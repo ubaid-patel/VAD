@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 import matplotlib.pyplot as plt
+from tqdm import tqdm  # <--- NEW IMPORT
 from model import CNNLSTMVAD
 
 # ================= CONFIG =================
@@ -44,6 +45,7 @@ def parse_tg(path):
     return intervals
 
 # ================= LOAD DATA =================
+print("Loading and processing data...") # Added status print
 X, Yv, Yn = [], [], []
 
 for root, _, files in os.walk(AUDIO):
@@ -98,6 +100,10 @@ for root, _, files in os.walk(AUDIO):
         for xmin, xmax, lab in intervals:
             s = int(xmin * SR / HOP)
             e = int(xmax * SR / HOP)
+            
+            # Bound checks
+            if s >= len(vad): continue
+            e = min(e, len(vad))
 
             if lab == 1:
                 vad[s:e] = 1                 # Speech
@@ -111,6 +117,8 @@ for root, _, files in os.walk(AUDIO):
             X.append(feat[i:i+SEQ])
             Yv.append(vad[i+SEQ-1])
             Yn.append(noise[i+SEQ-1])
+
+print(f"Data Loaded: {len(X)} sequences") # Added status print
 
 # ================= FAST TENSOR CONVERSION =================
 X = torch.from_numpy(np.array(X, dtype=np.float32))
@@ -151,11 +159,15 @@ patience_counter = 0
 train_losses, val_losses = [], []
 
 # ================= TRAIN =================
+print("Starting training...")
 for epoch in range(EPOCHS):
     model.train()
     train_loss = 0.0
-
-    for xb, yv, yn in train_loader:
+    
+    # ---- Wrapped with tqdm for progress bar
+    train_loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [Train]")
+    
+    for xb, yv, yn in train_loop:
         optimizer.zero_grad()
         out_vad, out_noise = model(xb)
 
@@ -170,6 +182,9 @@ for epoch in range(EPOCHS):
         optimizer.step()
 
         train_loss += loss.item()
+        
+        # Update progress bar with current batch loss
+        train_loop.set_postfix(loss=loss.item())
 
     # ---- Validation
     model.eval()
@@ -177,6 +192,7 @@ for epoch in range(EPOCHS):
     preds, trues = [], []
 
     with torch.no_grad():
+        # Iterate over validation without progress bar (optional, usually fast)
         for xb, yv, yn in val_loader:
             out_vad, out_noise = model(xb)
             loss = loss_vad(out_vad, yv)
@@ -196,9 +212,9 @@ for epoch in range(EPOCHS):
     train_losses.append(train_loss)
     val_losses.append(val_loss)
 
+    # Print summary after the progress bar closes
     print(
-        f"Epoch {epoch+1:02d} | "
-        f"Train Loss: {train_loss:.4f} | "
+        f"   -> Train Loss: {train_loss:.4f} | "
         f"Val Loss: {val_loss:.4f} | "
         f"Val Acc: {acc:.4f}"
     )
@@ -215,6 +231,7 @@ for epoch in range(EPOCHS):
             break
 
 # ================= VISUALIZATION =================
+print("Training complete. Showing graph...")
 plt.figure(figsize=(8, 4))
 plt.plot(train_losses, label="Train Loss")
 plt.plot(val_losses, label="Validation Loss")

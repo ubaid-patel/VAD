@@ -12,7 +12,7 @@ N_MFCC = 13
 SEQ_LEN = 20
 
 model = LSTMVAD(N_MFCC)
-model.load_state_dict(torch.load("lstm_vad_model.pth"))
+model.load_state_dict(torch.load("lstm_vad_model.pth", map_location=torch.device('cpu')))
 model.eval()
 
 buffer = deque(maxlen=SEQ_LEN)

@@ -3,7 +3,7 @@ import librosa
 import numpy as np
 import torch
 from collections import deque
-from vad_model import LSTMVAD
+from model import LSTMVAD
 
 SR = 16000
 FRAME_LEN = int(0.025 * SR)

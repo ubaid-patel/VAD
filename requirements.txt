@@ -1,0 +1,3 @@
+requirements.txtflask
+flask-sock
+werkzeug

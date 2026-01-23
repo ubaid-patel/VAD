@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live File Viewer</title>
+</head>
+<body>
+
+<h2>📡 Live File Stream</h2>
+<p>Status: <span id="status">Disconnected</span></p>
+<div id="output"></div>
+
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<script>
+const socket = io("http://localhost:9000");
+
+let chunks = [];
+let filename = "";
+
+socket.on("connect", () => {
+    document.getElementById("status").innerText = "Connected";
+});
+
+socket.on("disconnect", () => {
+    document.getElementById("status").innerText = "Disconnected";
+});
+
+socket.on("file_meta", meta => {
+    filename = meta.name;
+    chunks = [];
+    console.log("Receiving:", meta);
+});
+
+socket.on("file_chunk", chunk => {
+    chunks.push(new Uint8Array(chunk));
+});
+
+socket.on("file_done", () => {
+    const blob = new Blob(chunks);
+    const url = URL.createObjectURL(blob);
+
+    const out = document.getElementById("output");
+    out.innerHTML = "";
+
+    if (filename.match(/\.(jpg|png|gif)$/i)) {
+        out.innerHTML = `<img src="${url}" style="max-width:80%">`;
+    } else if (filename.match(/\.(mp4|webm)$/i)) {
+        out.innerHTML = `<video src="${url}" controls autoplay></video>`;
+    } else {
+        out.innerHTML = `<a href="${url}" download>${filename}</a>`;
+    }
+});
+</script>
+
+</body>
+</html>

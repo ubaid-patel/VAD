@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>VAD Live Interface</title>
+<style>
+    :root {
+        --bg: #111;
+        --panel: #1a1a1a;
+        --text: #eee;
+        --green: #0f0;
+        --red: #f00;
+        --dim: #555;
+    }
+
+    body {
+        background-color: var(--bg);
+        color: var(--text);
+        font-family: 'Courier New', monospace; /* Terminal vibe */
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        margin: 0;
+    }
+
+    .container {
+        background: var(--panel);
+        border: 1px solid #333;
+        padding: 40px;
+        border-radius: 8px;
+        width: 600px;
+        text-align: center;
+        box-shadow: 0 0 20px rgba(0,0,0,0.5);
+    }
+
+    h1 { margin-top: 0; font-size: 24px; text-transform: uppercase; letter-spacing: 2px; }
+
+    /* --- Status Box --- */
+    .status-box {
+        font-size: 32px;
+        font-weight: bold;
+        margin: 30px 0;
+        padding: 20px;
+        border-radius: 4px;
+        background: #000;
+        border: 2px solid #333;
+        transition: all 0.1s;
+    }
+
+    .status-box.speech {
+        border-color: var(--green);
+        color: var(--green);
+        box-shadow: 0 0 15px rgba(0, 255, 0, 0.2);
+        text-shadow: 0 0 10px rgba(0,255,0,0.5);
+    }
+
+    .status-box.silence {
+        border-color: var(--red);
+        color: var(--red);
+        opacity: 0.6;
+    }
+
+    /* --- Confidence Bar --- */
+    .bar-container {
+        background: #000;
+        height: 20px;
+        width: 100%;
+        border: 1px solid #444;
+        margin-bottom: 5px;
+        position: relative;
+    }
+
+    .bar-fill {
+        height: 100%;
+        background: var(--green);
+        width: 0%;
+        transition: width 0.05s linear;
+    }
+
+    .threshold-line {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        background: #fff;
+        opacity: 0.5;
+        z-index: 10;
+    }
+    
+    .label-row {
+        display: flex;
+        justify-content: space-between;
+        font-size: 12px;
+        color: #888;
+        margin-bottom: 20px;
+    }
+
+    /* --- Graph --- */
+    canvas {
+        background: #000;
+        border: 1px solid #333;
+        width: 100%;
+        height: 150px;
+    }
+
+    /* --- Controls --- */
+    button {
+        background: #333;
+        color: #fff;
+        border: 1px solid #555;
+        padding: 10px 20px;
+        font-family: inherit;
+        font-size: 14px;
+        cursor: pointer;
+        margin-top: 20px;
+    }
+    button:hover { background: #444; }
+    button.active { background: var(--green); color: #000; border-color: var(--green); font-weight: bold; }
+
+    .meta { font-size: 12px; color: #555; margin-top: 10px; }
+</style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Live VAD Monitor</h1>
+
+    <div id="statusBox" class="status-box silence">🔇 SILENCE</div>
+
+    <div class="bar-container">
+        <div class="threshold-line" style="left: 40%" title="Speech OFF (0.4)"></div>
+        <div class="threshold-line" style="left: 60%" title="Speech ON (0.6)"></div>
+        <div id="barFill" class="bar-fill"></div>
+    </div>
+    <div class="label-row">
+        <span>0%</span>
+        <span>OFF (0.4)</span>
+        <span>ON (0.6)</span>
+        <span>100%</span>
+    </div>
+    <div id="confValue" style="margin-bottom: 10px; font-weight: bold;">0.0%</div>
+
+    <canvas id="graph" width="518" height="150"></canvas>
+
+    <button id="toggleBtn">START MICROPHONE</button>
+    <div class="meta" id="latencyDisplay">Latency: -- ms</div>
+</div>
+
+<script>
+    // ================= CONFIG =================
+    const WS_URL = "ws://localhost:8000/vad";
+    const SAMPLE_RATE = 16000; 
+    
+    // ================= STATE =================
+    let ws = null;
+    let audioCtx = null;
+    let processor = null;
+    let microphone = null;
+    let isRunning = false;
+    let lastPingTime = 0;
+
+    // Graph Data
+    const historyLen = 100;
+    const historyData = new Array(historyLen).fill(0);
+
+    // ================= UI ELEMENTS =================
+    const btn = document.getElementById('toggleBtn');
+    const statusBox = document.getElementById('statusBox');
+    const barFill = document.getElementById('barFill');
+    const confValue = document.getElementById('confValue');
+    const latencyDisplay = document.getElementById('latencyDisplay');
+    const canvas = document.getElementById('graph');
+    const ctx = canvas.getContext('2d');
+
+    // ================= WEBSOCKET =================
+    function connectWS() {
+        ws = new WebSocket(WS_URL);
+        
+        ws.onopen = () => { console.log("✅ WS Connected"); };
+        
+        ws.onmessage = (event) => {
+            // Calc Latency (Time since we sent data is hard to track perfectly per packet in JS, 
+            // so we track inter-arrival time as a proxy or just round trip if we pinged)
+            const now = performance.now();
+            const latency = now - lastPingTime;
+            lastPingTime = now;
+            latencyDisplay.innerText = `Update Interval: ${latency.toFixed(1)}ms`;
+
+            const data = JSON.parse(event.data);
+            updateUI(data);
+        };
+
+        ws.onclose = () => { console.log("❌ WS Closed"); };
+    }
+
+    // ================= AUDIO ENGINE =================
+    async function startAudio() {
+        try {
+            // Force 16k sample rate to match server model
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+            
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            microphone = audioCtx.createMediaStreamSource(stream);
+
+            // ScriptProcessor (Buffer size 256 or 512 is good balance for latency)
+            // 256 samples @ 16k = 16ms latency
+            processor = audioCtx.createScriptProcessor(512, 1, 1);
+
+            processor.onaudioprocess = (e) => {
+                if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+                // Get float32 PCM data
+                const inputData = e.inputBuffer.getChannelData(0);
+                
+                // Downsample if browser didn't respect 16k (fallback)
+                // But usually modern browsers respect the context sampleRate
+                
+                // Send to server
+                ws.send(inputData.buffer);
+                lastPingTime = performance.now();
+            };
+
+            microphone.connect(processor);
+            processor.connect(audioCtx.destination); // Needed for Chrome to run the processor
+
+            isRunning = true;
+            btn.innerText = "STOP MICROPHONE";
+            btn.classList.add("active");
+
+        } catch (err) {
+            console.error("Mic Error:", err);
+            alert("Could not access microphone.");
+        }
+    }
+
+    function stopAudio() {
+        if (microphone) microphone.disconnect();
+        if (processor) processor.disconnect();
+        if (audioCtx) audioCtx.close();
+        isRunning = false;
+        btn.innerText = "START MICROPHONE";
+        btn.classList.remove("active");
+    }
+
+    // ================= UI UPDATES =================
+    function updateUI(data) {
+        // 1. Status Box
+        if (data.speech) {
+            statusBox.innerText = "🗣️ SPEECH";
+            statusBox.className = "status-box speech";
+        } else {
+            statusBox.innerText = "🔇 SILENCE";
+            statusBox.className = "status-box silence";
+        }
+
+        // 2. Confidence Bar
+        const pct = (data.confidence * 100).toFixed(1);
+        barFill.style.width = pct + "%";
+        confValue.innerText = pct + "%";
+
+        // 3. Update Graph History
+        historyData.push(data.confidence);
+        historyData.shift();
+        drawGraph();
+    }
+
+    function drawGraph() {
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Draw Threshold Lines on Graph
+        const yOn = canvas.height - (0.6 * canvas.height);
+        const yOff = canvas.height - (0.4 * canvas.height);
+        
+        ctx.strokeStyle = '#333';
+        ctx.setLineDash([5, 5]);
+        
+        ctx.beginPath(); ctx.moveTo(0, yOn); ctx.lineTo(canvas.width, yOn); ctx.stroke(); // 0.6 Line
+        ctx.beginPath(); ctx.moveTo(0, yOff); ctx.lineTo(canvas.width, yOff); ctx.stroke(); // 0.4 Line
+
+        ctx.setLineDash([]);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#0f0';
+        ctx.beginPath();
+
+        const step = canvas.width / historyLen;
+
+        for (let i = 0; i < historyLen; i++) {
+            const val = historyData[i];
+            const x = i * step;
+            const y = canvas.height - (val * canvas.height);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+    }
+
+    // ================= INIT =================
+    connectWS();
+
+    btn.onclick = () => {
+        if (isRunning) stopAudio();
+        else startAudio();
+    };
+
+</script>
+</body>
+</html>
